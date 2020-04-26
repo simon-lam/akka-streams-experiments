@@ -9,7 +9,7 @@ import akka.stream.{Attributes, FlowShape, Inlet, Outlet}
 
 import scala.collection.mutable
 import scala.concurrent.duration._
-import scala.concurrent.{Future, Promise}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
 class FlowRateGauge[T] extends GraphStageWithMaterializedValue[FlowShape[T, T], FlowRateGaugeProbe] {
 
@@ -22,9 +22,12 @@ class FlowRateGauge[T] extends GraphStageWithMaterializedValue[FlowShape[T, T], 
     val logic = new FlowRateGaugeGraphStageLogic[T](shape)
 
     (logic, new FlowRateGaugeProbe {
-      override def takeReading: BigDecimal = logic.defaultReading.asElementsPerSecond
+      override def delayedReading: BigDecimal = logic.delayedReading.asElementsPerSecond
 
-      override def takeReading(duration: FiniteDuration): Future[BigDecimal] = logic.takeReading(duration)
+      override def takeReading(duration: FiniteDuration)
+                              (implicit ec: ExecutionContext): Future[BigDecimal] = {
+        logic.takeReading(duration).map(_.asElementsPerSecond)
+      }
     })
   }
 }
@@ -32,7 +35,7 @@ class FlowRateGauge[T] extends GraphStageWithMaterializedValue[FlowShape[T, T], 
 class FlowRateGaugeGraphStageLogic[T](shape: FlowShape[T, T], interval: FiniteDuration = 1 seconds)
   extends TimerGraphStageLogic(shape) with InHandler with OutHandler {
 
-  private final val DefaultReadingTimer = "default-sample"
+  private final val DelayedReadingTimer = "delayed-reading"
 
   private val in = shape.in
   private val out = shape.out
@@ -52,9 +55,9 @@ class FlowRateGaugeGraphStageLogic[T](shape: FlowShape[T, T], interval: FiniteDu
   private val readings = mutable.Map.empty[String, FlowRateGaugeReading]
   private val readingsInProgress = mutable.Map.empty[String, Promise[FlowRateGaugeReading]]
 
-  def defaultReading = {
+  def delayedReading = {
     val currentElementCount = elementsSeen.get()
-    readings.getOrElseUpdate(DefaultReadingTimer,
+    readings.getOrElseUpdate(DelayedReadingTimer,
       FlowRateGaugeReading(currentElementCount, currentElementCount, interval))
   }
 
@@ -64,20 +67,21 @@ class FlowRateGaugeGraphStageLogic[T](shape: FlowShape[T, T], interval: FiniteDu
     readings.update(readingKey, FlowRateGaugeReading(currentElementCount, currentElementCount, duration))
     val promise = Promise[FlowRateGaugeReading]()
     readingsInProgress.update(readingKey, promise)
+    scheduleOnce(readingKey, duration)
     promise.future
   }
 
   private def initDefaultReadingTimer(): Unit = {
-    if (!isTimerActive(DefaultReadingTimer)) {
-      scheduleAtFixedRate(DefaultReadingTimer, 0 seconds, interval)
+    if (!isTimerActive(DelayedReadingTimer)) {
+      scheduleAtFixedRate(DelayedReadingTimer, 0 seconds, interval)
     }
   }
 
   override def onTimer(timerKey: Any): Unit = {
     timerKey match {
-      case r: String if r == DefaultReadingTimer =>
+      case r: String if r == DelayedReadingTimer =>
         val currentElementCount = elementsSeen.get()
-        val sample = defaultReading
+        val sample = delayedReading
         readings.update(r, sample.update(currentElementCount))
 
       case r: String =>
@@ -101,13 +105,13 @@ case class FlowRateGaugeReading(startingElementCount: Long,
     timestamp = ZonedDateTime.now())
 
   def asElementsPerSecond: BigDecimal = {
-    (endingElementCount - startingElementCount) / duration.toSeconds
+    ((endingElementCount - startingElementCount) / duration.toMillis) * 1000
   }
 }
 
 trait FlowRateGaugeProbe {
-  // Elements per second
-  def takeReading: BigDecimal
 
-  def takeReading(duration: FiniteDuration): Future[BigDecimal]
+  def delayedReading: BigDecimal
+
+  def takeReading(duration: FiniteDuration)(implicit ec: ExecutionContext): Future[BigDecimal]
 }
