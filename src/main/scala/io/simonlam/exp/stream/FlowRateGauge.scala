@@ -43,7 +43,7 @@ class FlowRateGaugeGraphStageLogic[T](shape: FlowShape[T, T], interval: FiniteDu
   private val elementsSeen = new AtomicLong(0L)
 
   override def onPush(): Unit = push(out, {
-    initDefaultReadingTimer()
+    initDelayedReadingTimer()
     elementsSeen.incrementAndGet()
     grab(in)
   })
@@ -71,7 +71,7 @@ class FlowRateGaugeGraphStageLogic[T](shape: FlowShape[T, T], interval: FiniteDu
     promise.future
   }
 
-  private def initDefaultReadingTimer(): Unit = {
+  private def initDelayedReadingTimer(): Unit = {
     if (!isTimerActive(DelayedReadingTimer)) {
       scheduleAtFixedRate(DelayedReadingTimer, 0 seconds, interval)
     }
